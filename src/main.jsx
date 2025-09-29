@@ -1,12 +1,16 @@
 import React from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router-dom'
+
 import App from './ui/App.jsx'
 import ErrorBoundary from './ui/ErrorBoundary.jsx'
-import { SoundProvider } from './core/sound.js'
+import { SoundProvider } from './core/sound.jsx'
+
 import './styles/index.css'
 
-createRoot(document.getElementById('root')).render(
+const rootEl = document.getElementById('root')
+
+createRoot(rootEl).render(
   <React.StrictMode>
     <BrowserRouter>
       <ErrorBoundary>
