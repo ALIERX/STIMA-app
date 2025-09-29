@@ -1,252 +1,227 @@
 import React, { useMemo, useState, useEffect } from 'react'
 import { Card } from '../components.jsx'
-import { PieChart, Pie, Sector, ResponsiveContainer, Tooltip, LineChart, Line, XAxis, YAxis } from 'recharts'
 import { CATEGORIES } from '../../core/state'
-import { fmtEUR, todayISO } from '../../core/utils'
+import { fmtEUR, todayISO, hashStr } from '../../core/utils'
 import Ticker from '../widgets/Ticker.jsx'
+import HeroDonut from '../widgets/HeroDonut.jsx'
 import BlockchainLive from '../widgets/BlockchainLive.jsx'
 import NewsGrid from '../widgets/NewsGrid.jsx'
-import { motion, useAnimation } from 'framer-motion'
+import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, Tooltip as RTooltip } from 'recharts'
+import { HelpCircle, Upload, ExternalLink } from 'lucide-react'
+import { motion } from 'framer-motion'
 
-/**
- * STIMA — Home (WOW edition, EN)
- * - Hero with pulsing donut (interactive) + token counters
- * - Wall Street–style scrolling ticker with category momentum
- * - Bento grid: Weekly Momentum, Category Heat, Liquidity Simulator
- * - Blockchain Live feed (animated)
- * - News/Insights cards (placeholders)
- * - Tiny synth "blip" on hover/click (no assets needed)
- */
-
-function useBlip() {
-  // Tiny WebAudio click/bleep
-  return () => {
-    try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)()
-      const o = ctx.createOscillator()
-      const g = ctx.createGain()
-      o.type = 'sine'
-      o.frequency.value = 880
-      g.gain.setValueAtTime(0.0001, ctx.currentTime)
-      g.gain.exponentialRampToValueAtTime(0.04, ctx.currentTime + 0.01)
-      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.12)
-      o.connect(g); g.connect(ctx.destination)
-      o.start()
-      o.stop(ctx.currentTime + 0.13)
-    } catch (e) { /* ignore */ }
-  }
+/** Small “?” tooltip */
+function InfoTip({ text }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <span className="relative inline-block">
+      <button
+        type="button"
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+        className="ml-2 inline-flex items-center justify-center w-5 h-5 rounded-full border text-slate-600 hover:bg-slate-50"
+        aria-label="What is this?"
+        title={text}
+      >
+        <HelpCircle size={12}/>
+      </button>
+      {open && (
+        <div className="absolute z-10 mt-2 w-64 p-2 text-xs bg-white border rounded-lg shadow">
+          {text}
+        </div>
+      )}
+    </span>
+  )
 }
 
-export default function Home({state}) {
-  const blip = useBlip()
+/** Simple modal */
+function Modal({ open, title, onClose, children }) {
+  if (!open) return null
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/30" onClick={onClose}/>
+      <div className="relative z-10 w-full max-w-2xl bg-white rounded-2xl border shadow-lg">
+        <div className="flex items-center justify-between px-4 py-3 border-b">
+          <div className="font-semibold">{title}</div>
+          <button onClick={onClose} className="text-sm px-2 py-1 rounded-lg border">Close</button>
+        </div>
+        <div className="p-4">{children}</div>
+      </div>
+    </div>
+  )
+}
 
-  // ===== Compute verified reserves by category =====
-  const categorySeries = useMemo(() => {
+export default function Home({ state }) {
+  // ===== Derived data =====
+  const byCategory = useMemo(() => {
     const map = new Map(CATEGORIES.map(c => [c.id, 0]))
     state.assets.filter(a => a.verified).forEach(a => {
       const last = a.history[a.history.length - 1]
       const v = last ? last.display : a.declaredValueEUR
       map.set(a.category, (map.get(a.category) || 0) + v)
     })
-    return CATEGORIES.map(c => ({ name: c.label, key: c.id, value: map.get(c.id) || 0 }))
+    return CATEGORIES.map(c => ({ id: c.id, name: c.label, value: map.get(c.id) || 0 }))
   }, [state.assets])
 
-  const totalReserve = categorySeries.reduce((s, d) => s + d.value, 0)
-
-  // ===== Token counters in the donut =====
+  const totalReserve = byCategory.reduce((s,d)=>s+d.value, 0)
   const minted = state.token.totalSupply
-  // Potential = (reserve / nav) - minted  (>= 0)
   const nav = state.token.navPerToken || 1
-  const potential = Math.max(0, (totalReserve / Math.max(1, nav)) - minted)
 
-  // ===== Weekly mini-series for momentum (fake from history) =====
+  // Simulated DEX liquidity (placeholder for Uniswap pair)
+  const simulatedLiquidityEUR = useMemo(() => {
+    const seed = hashStr(todayISO())
+    const base = totalReserve * (0.16 + (seed % 7) * 0.01) // ~16–22% of reserve
+    const jitter = (seed % 1000) / 1000 * 0.06 // +0–6%
+    return Math.round(base * (1 + jitter))
+  }, [totalReserve])
+
+  // Weekly per-category series (build from asset histories)
   const weekly = useMemo(() => {
-    // Build a per-category last-7 "index" using asset display history
-    const byCat = Object.fromEntries(CATEGORIES.map(c => [c.id, []]))
+    const m = Object.fromEntries(CATEGORIES.map(c=>[c.id, []]))
     const dates = new Set()
-    state.assets.forEach(a => {
-      a.history.slice(-7).forEach(h => dates.add(h.date))
-    })
-    const sortedDates = [...dates].sort()
+    state.assets.forEach(a => a.history.slice(-7).forEach(h => dates.add(h.date)))
+    const sorted = [...dates].sort()
     CATEGORIES.forEach(c => {
-      const points = sortedDates.map(d => {
+      const arr = sorted.map(d => {
         const sum = state.assets
-          .filter(a => a.verified && a.category === c.id)
-          .reduce((acc, a) => {
-            const hit = a.history.find(h => h.date === d)
+          .filter(a => a.verified && a.category===c.id)
+          .reduce((acc,a) => {
+            const hit = a.history.find(h=>h.date===d)
             return acc + (hit ? hit.display : 0)
           }, 0)
         return { date: d, value: sum }
       })
-      byCat[c.id] = points
+      m[c.id] = arr
     })
-    return { dates: sortedDates, byCat }
+    return { dates: sorted, byCat: m }
   }, [state.assets])
 
-  const [activeSlice, setActiveSlice] = useState(null)
+  // ===== Category DPI modal =====
+  const [openModal, setOpenModal] = useState(false)
+  const [modalCat, setModalCat] = useState(null)
+  const modalData = useMemo(() => {
+    if (!modalCat) return []
+    const series = weekly.byCat[modalCat] || []
+    // Build a normalized DPI (index base 100)
+    if (!series.length) return []
+    const base = series[0].value || 1
+    return series.map((p, i) => ({
+      label: p.date?.slice(5) || `D${i}`,
+      dpi: base ? (p.value / base) * 100 : 100
+    }))
+  }, [modalCat, weekly])
 
-  // Pulsing controls
-  const controls = useAnimation()
-  useEffect(() => {
-    controls.start({
-      scale: [1, 1.035, 1],
-      transition: { duration: 1.75, repeat: Infinity, ease: 'easeInOut' }
-    })
-  }, [controls])
-
-  const renderActiveShape = (props) => {
-    const RAD = Math.PI / 180
-    const { cx, cy, midAngle, innerRadius, outerRadius, startAngle, endAngle, payload, value } = props
-    const sin = Math.sin(-RAD * midAngle)
-    const cos = Math.cos(-RAD * midAngle)
-    const sx = cx + (outerRadius + 8) * cos
-    const sy = cy + (outerRadius + 8) * sin
-    const mx = cx + (outerRadius + 18) * cos
-    const my = cy + (outerRadius + 18) * sin
-    const ex = mx + (cos >= 0 ? 1 : -1) * 12
-    const ey = my
-    const ta = cos >= 0 ? 'start' : 'end'
-    const total = Math.max(1, totalReserve)
-    return (
-      <g>
-        <Sector cx={cx} cy={cy} innerRadius={innerRadius} outerRadius={outerRadius} startAngle={startAngle} endAngle={endAngle}/>
-        <Sector cx={cx} cy={cy} innerRadius={outerRadius+4} outerRadius={outerRadius+8} startAngle={startAngle} endAngle={endAngle}/>
-        <path d={`M${sx},${sy}L${mx},${my}L${ex},${ey}`} fill="none" stroke="#111"/>
-        <circle cx={ex} cy={ey} r={2} fill="#111" stroke="none"/>
-        <text x={ex + (cos >= 0 ? 6 : -6)} y={ey} textAnchor={ta} className="fill-current text-sm">{payload.name}</text>
-        <text x={ex + (cos >= 0 ? 6 : -6)} y={ey+14} textAnchor={ta} className="fill-current text-xs">
-          {fmtEUR(value)} · {(value/total*100).toFixed(1)}%
-        </text>
-      </g>
-    )
-  }
-
-  // Small helper: generic sparkline renderer
-  function Sparkline({ data }) {
-    if (!data || data.length < 2) return <div className="h-8"/>
-    const compact = data.map(d => ({ x: d.date?.slice(5), y: d.value || 0 }))
-    return (
-      <ResponsiveContainer width="100%" height={32}>
-        <LineChart data={compact}>
-          <XAxis hide dataKey="x" />
-          <YAxis hide domain={['auto', 'auto']} />
-          <Line type="monotone" dataKey="y" dot={false} stroke="#111" strokeWidth={1.4} />
-        </LineChart>
-      </ResponsiveContainer>
-    )
+  function openCategoryModal(catId) {
+    setModalCat(catId)
+    setOpenModal(true)
   }
 
   return (
     <main className="max-w-7xl mx-auto p-6 space-y-6">
-      {/* ====== Wall Street–style ticker ====== */}
+      {/* ===== Ticker ===== */}
       <Card className="p-0 overflow-hidden">
-        <Ticker weekly={weekly} />
+        <div className="flex items-center justify-between px-4 py-3">
+          <div className="text-sm font-medium">
+            Market Ticker
+            <InfoTip text="Live-like scrolling view of category momentum with micro sparklines. Data is derived from recent valuation snapshots."/>
+          </div>
+          <div className="text-xs text-slate-500">Today — {todayISO()}</div>
+        </div>
+        <Ticker weekly={weekly}/>
       </Card>
 
-      {/* ====== Hero: pulsing donut + counters ====== */}
+      {/* ===== Hero ===== */}
       <Card className="p-0">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-center">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
           <div className="lg:col-span-7">
-            <motion.div
-              animate={controls}
-              onMouseEnter={() => { controls.start({ scale: 1.06 }); blip() }}
-              onMouseLeave={() => controls.start({ scale: 1 })}
-              className="relative h-[360px]"
-            >
-              <div className="absolute inset-0">
-                <ResponsiveContainer width="100%" height="100%">
-                  <PieChart>
-                    <Pie
-                      activeIndex={activeSlice}
-                      activeShape={renderActiveShape}
-                      data={categorySeries}
-                      dataKey="value"
-                      nameKey="name"
-                      cx="50%"
-                      cy="50%"
-                      innerRadius={90}
-                      outerRadius={140}
-                      onMouseEnter={(_, i) => setActiveSlice(i)}
-                      onMouseLeave={() => setActiveSlice(null)}
-                      onClick={() => blip()}
-                    />
-                    <Tooltip formatter={(v) => fmtEUR(v)} />
-                  </PieChart>
-                </ResponsiveContainer>
-              </div>
-
-              {/* Center counters overlay */}
-              <div className="absolute inset-0 flex flex-col items-center justify-center text-center pointer-events-none">
-                <div className="text-xs text-slate-500">Total minted</div>
-                <div className="text-2xl font-bold">{minted.toFixed(2)} STIMA</div>
-                <div className="mt-2 text-xs text-slate-500">In processing</div>
-                <div className="text-lg font-semibold">{potential.toFixed(2)} STIMA</div>
-                <div className="mt-3 text-xs text-slate-500">Reserve (verified): <strong>{fmtEUR(totalReserve)}</strong></div>
-              </div>
-            </motion.div>
+            <HeroDonut state={state} />
           </div>
-
-          {/* Right-side quick facts */}
           <div className="lg:col-span-5 p-4">
-            <div className="text-sm text-slate-500">Today — {todayISO()}</div>
-            <h2 className="text-xl font-semibold">STIMA Ecosystem Overview</h2>
+            <div className="flex items-center gap-2">
+              <h2 className="text-xl font-semibold">STIMA Ecosystem Overview</h2>
+              <InfoTip text="This is the heartbeat of STIMA: verified assets form the reserve; daily deterministic valuations power the NAV and mint capacity."/>
+            </div>
             <ul className="mt-3 text-sm space-y-2">
-              <li>Deterministic daily valuations (idempotent) with hysteresis + TWAP.</li>
-              <li>Verified assets contribute to reserve and token NAV.</li>
-              <li>10% liquidity autopilot on each mint.</li>
+              <li><strong>Verified reserve:</strong> {fmtEUR(totalReserve)}</li>
+              <li><strong>Minted supply:</strong> {minted.toFixed(2)} STIMA</li>
+              <li className="flex items-center gap-2">
+                <span><strong>Simulated DEX liquidity:</strong> {fmtEUR(simulatedLiquidityEUR)}</span>
+                <InfoTip text="Placeholder: this simulates current liquidity on a DEX pair (e.g., Uniswap). Later we’ll replace it with live on-chain data."/>
+              </li>
             </ul>
-            <div className="mt-4 grid grid-cols-2 gap-3">
-              {categorySeries.map(d => (
-                <div key={d.key} className="p-3 rounded-xl border bg-white hover:bg-slate-50">
-                  <div className="text-xs text-slate-500">{d.name}</div>
-                  <div className="text-sm font-medium">{fmtEUR(d.value)}</div>
-                  <div className="mt-1"><Sparkline data={weekly.byCat[d.key]} /></div>
+
+            {/* Category explorer grid */}
+            <div className="mt-4">
+              <div className="text-sm font-medium mb-2">
+                Category Explorer
+                <InfoTip text="Click a category to open its DPI (Daily Price Index) mini chart and relative share of the reserve."/>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                {byCategory.map(c => {
+                  const pct = totalReserve ? (c.value / totalReserve) * 100 : 0
+                  return (
+                    <button
+                      key={c.id}
+                      onClick={() => openCategoryModal(c.id)}
+                      className="text-left rounded-xl border bg-white p-3 hover:bg-slate-50"
+                      title="Open DPI popup"
+                    >
+                      <div className="flex items-center justify-between">
+                        <div className="text-sm font-medium">{c.name}</div>
+                        <div className="text-xs text-slate-500">{pct.toFixed(1)}%</div>
+                      </div>
+                      <div className="text-xs mt-1">{fmtEUR(c.value)}</div>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+
+            {/* CTA: Add your asset */}
+            <div className="mt-5 rounded-2xl border bg-white p-4">
+              <div className="flex items-start justify-between">
+                <div>
+                  <div className="text-sm font-semibold flex items-center gap-2">
+                    Add your asset <InfoTip text="Register your watch, artwork, wine, or other collectible. We’ll compute a stable, daily valuation and prepare it for tokenization."/>
+                  </div>
+                  <p className="text-sm text-slate-600 mt-1">
+                    STIMA is an asset-intelligence portal. Upload an item, get a consistent valuation (idempotent per day),
+                    and see how it contributes to the ecosystem’s reserve and mint capacity.
+                  </p>
                 </div>
-              ))}
+                <a href="/assets" className="inline-flex items-center gap-2 px-3 py-2 rounded-xl border bg-black text-white text-sm">
+                  <Upload size={14}/> Add asset
+                </a>
+              </div>
+              <div className="text-xs text-slate-500 mt-2">
+                Want to learn more?
+                <a href="/trends" className="inline-flex items-center gap-1 ml-1 underline">
+                  Explore Trends <ExternalLink size={12}/>
+                </a>
+              </div>
             </div>
           </div>
         </div>
       </Card>
 
-      {/* ====== Bento grid (modern “wow” layout) ====== */}
+      {/* ===== Bento: Heat + Liquidity ===== */}
       <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
-        {/* Weekly Momentum */}
+        {/* Heat by share */}
         <Card className="md:col-span-6">
-          <div className="text-sm text-slate-500">Weekly Momentum</div>
-          <div className="text-lg font-semibold">Top categories this week</div>
-          <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
-            {CATEGORIES.map(c => {
-              const arr = weekly.byCat[c.id]
-              const latest = arr?.[arr.length - 1]?.value || 0
-              const prev = arr?.[arr.length - 2]?.value || 0
-              const chg = prev ? (latest - prev) / Math.max(1, prev) : 0
-              return (
-                <div key={c.id} className="rounded-xl border bg-white p-3">
-                  <div className="text-sm font-medium">{c.label}</div>
-                  <div className={`text-xs ${chg >= 0 ? 'text-emerald-600' : 'text-rose-600'}`}>
-                    {chg >= 0 ? '▲' : '▼'} {(chg * 100).toFixed(2)}%
-                  </div>
-                  <div className="mt-1"><Sparkline data={arr} /></div>
-                </div>
-              )
-            })}
+          <div className="text-sm font-medium">
+            Category Heat by Share
+            <InfoTip text="Relative share of the verified reserve by category. Useful to spot concentration and diversification."/>
           </div>
-        </Card>
-
-        {/* Category Heat */}
-        <Card className="md:col-span-3">
-          <div className="text-sm text-slate-500">Category Heat</div>
-          <div className="text-lg font-semibold">Share of reserve</div>
           <div className="mt-3 space-y-2">
-            {categorySeries
+            {byCategory
               .slice()
-              .sort((a,b)=> b.value - a.value)
-              .map(d => {
-                const pct = totalReserve ? (d.value / totalReserve) * 100 : 0
+              .sort((a,b)=> b.value-a.value)
+              .map(c => {
+                const pct = totalReserve ? (c.value/totalReserve)*100 : 0
                 return (
-                  <div key={d.key}>
+                  <div key={c.id}>
                     <div className="flex justify-between text-xs">
-                      <span>{d.name}</span><span>{pct.toFixed(1)}%</span>
+                      <span>{c.name}</span><span>{pct.toFixed(1)}%</span>
                     </div>
                     <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
                       <div className="h-full" style={{ width: `${pct}%`, background: 'linear-gradient(90deg,#111,#444)' }} />
@@ -257,53 +232,76 @@ export default function Home({state}) {
           </div>
         </Card>
 
-        {/* Liquidity Simulator */}
-        <Card className="md:col-span-3">
-          <div className="text-sm text-slate-500">Liquidity Simulator</div>
-          <div className="text-lg font-semibold">What if we mint now?</div>
-          <Simulator minted={minted} nav={nav} />
+        {/* Simulated DEX Liquidity */}
+        <Card className="md:col-span-6">
+          <div className="text-sm font-medium">
+            Exchange Liquidity (simulated)
+            <InfoTip text="Estimated liquidity on a DEX pair (e.g., Uniswap). This is simulated for demo; later it will pull live pair reserves."/>
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-3 text-sm">
+            <div className="p-3 rounded-xl border bg-white">
+              <div className="text-xs text-slate-500">Current (est.)</div>
+              <div className="text-lg font-semibold">{fmtEUR(simulatedLiquidityEUR)}</div>
+            </div>
+            <div className="p-3 rounded-xl border bg-white">
+              <div className="text-xs text-slate-500">NAV/token</div>
+              <div className="text-lg font-semibold">€ {nav.toFixed(4)}</div>
+            </div>
+          </div>
+          <p className="text-xs text-slate-500 mt-2">
+            Figures are placeholders based on reserve and daily seed — replace with on-chain pair data when contracts are live.
+          </p>
         </Card>
       </div>
 
-      {/* ====== Blockchain Live & News ====== */}
+      {/* ===== Blockchain + News ===== */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         <Card className="lg:col-span-5">
-          <div className="text-sm text-slate-500">Blockchain Live</div>
-          <div className="text-lg font-semibold">Recent on-chain events</div>
-          <BlockchainLive state={state} />
+          <div className="text-sm font-medium">
+            Blockchain Live
+            <InfoTip text="Animated feed from simulated events (and live later): verifications, mint-ready states, and oracle snapshots."/>
+          </div>
+          <div className="text-xs text-slate-500 mb-2">Today — {todayISO()}</div>
+          <BlockchainLive state={state}/>
         </Card>
         <Card className="lg:col-span-7">
-          <div className="text-sm text-slate-500">Insights & News</div>
-          <div className="text-lg font-semibold">Curated market updates</div>
-          <NewsGrid />
+          <div className="text-sm font-medium">
+            Insights & News
+            <InfoTip text="Curated market notes across watches, art, wine and more. Replace with a real API or editorial feed."/>
+          </div>
+          <NewsGrid/>
         </Card>
       </div>
-    </main>
-  )
-}
 
-/* ===== Liquidity Simulator (mini widget) ===== */
-function Simulator({ minted, nav }) {
-  const [v, setV] = useState(5000) // EUR
-  const mintAmount = v / Math.max(1, nav)
-  const lp = v * 0.10
-  return (
-    <div className="mt-3 text-sm">
-      <label className="text-xs text-slate-500">Declared value (€)</label>
-      <input type="range" min={500} max={100000} step={500} value={v}
-             onChange={e=>setV(Number(e.target.value))}
-             className="w-full" />
-      <div className="grid grid-cols-2 gap-2 mt-2">
-        <div className="p-2 rounded-lg border bg-white">
-          <div className="text-xs text-slate-500">Minted (est.)</div>
-          <div className="font-medium">{mintAmount.toFixed(2)} STIMA</div>
-        </div>
-        <div className="p-2 rounded-lg border bg-white">
-          <div className="text-xs text-slate-500">LP 10%</div>
-          <div className="font-medium">€ {lp.toLocaleString('en-US')}</div>
-        </div>
-      </div>
-      <div className="mt-2 text-xs text-slate-500">Current NAV/token: <strong>€ {nav.toFixed(4)}</strong> · Minted supply: <strong>{minted.toFixed(2)}</strong></div>
-    </div>
+      {/* ===== DPI Modal ===== */}
+      <Modal
+        open={openModal}
+        title="Category DPI (Daily Price Index)"
+        onClose={()=>setOpenModal(false)}
+      >
+        {!modalCat || modalData.length===0 ? (
+          <div className="text-sm text-slate-500">No recent data available for this category.</div>
+        ) : (
+          <div>
+            <div className="text-sm text-slate-500 mb-2">
+              Category: <strong>{CATEGORIES.find(c=>c.id===modalCat)?.label}</strong>
+            </div>
+            <div className="h-56">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={modalData}>
+                  <XAxis dataKey="label" tick={{ fontSize: 10 }}/>
+                  <YAxis domain={['auto','auto']} tick={{ fontSize: 10 }}/>
+                  <RTooltip />
+                  <Line type="monotone" dataKey="dpi" dot={false} stroke="#111" strokeWidth={1.6}/>
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="text-xs text-slate-500 mt-2">
+              DPI is normalized with base 100 at the oldest visible date, computed from daily display valuations of verified assets in this category.
+            </div>
+          </div>
+        )}
+      </Modal>
+    </main>
   )
 }
